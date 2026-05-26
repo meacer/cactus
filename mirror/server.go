@@ -165,6 +165,12 @@ func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
 	currentSize, currentRoot, currentNote := s.cfg.Follower.Current()
 	if parsed.checkpointSize != currentSize || parsed.checkpointRoot != currentRoot {
 		result = "checkpoint_conflict"
+		s.cfg.Follower.cfg.Logger.Warn("checkpoint conflict in sign-subtree",
+			"req_size", parsed.checkpointSize,
+			"req_root", fmt.Sprintf("%x", parsed.checkpointRoot),
+			"cur_size", currentSize,
+			"cur_root", fmt.Sprintf("%x", currentRoot),
+		)
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusConflict)
 		_, _ = w.Write(currentNote)
