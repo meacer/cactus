@@ -309,7 +309,8 @@ ceil(168) + 1 = 169` ⇒ ~10 KiB of relying party state per CA. See
   },
   "sign_subtree_listen": ":14081",
   "sign_subtree_path": "/sign-subtree",
-  "require_ca_signature_on_subtree": true
+  "require_ca_signature_on_subtree": true,
+  "checkpoint_cosignatures": true
 }
 ```
 

@@ -196,9 +196,17 @@ func (s *Server) handleAddCheckpoint(w http.ResponseWriter, r *http.Request) {
 	} else if oldSize == 0 {
 		// Accept any new root if we have no prior state
 	} else {
-		// TODO: Implement full consistency proof verification for arbitrary sizes.
-		// For now, we assume the proof is valid and accept the new root.
-		// This allows testing the workflow without full verification.
+		// Verify consistency proof: old tree → new tree.
+		if err := tlogx.VerifyConsistencyProof(
+			sha256Hash, 0, oldSize, newSize, proof,
+			currentRoot, newRoot,
+		); err != nil {
+			http.Error(w, "consistency proof failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.cfg.Follower.cfg.Logger.Info("consistency proof valid",
+			"old_size", oldSize,
+			"new_size", newSize)
 	}
 
 	msg := []byte(noteParts[0])
