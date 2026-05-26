@@ -172,9 +172,11 @@ func run(cfg config.Config, logger *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("signer: %w", err)
 	}
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: sgn.PublicKey()})
 	logger.Info("cosigner ready",
 		"alg", sgn.Algorithm().String(),
-		"id", cfg.CACosigner.ID)
+		"id", cfg.CACosigner.ID,
+		"public_key_pem", string(pemBytes))
 
 	// Metrics first so the log and ACME server can register.
 	m := metrics.New()
@@ -488,6 +490,11 @@ func startMirror(
 	if err != nil {
 		return nil, fmt.Errorf("mirror signer: %w", err)
 	}
+	mPemBytes := pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: mSigner.PublicKey()})
+	logger.Info("mirror cosigner ready",
+		"alg", mSigner.Algorithm().String(),
+		"id", cfg.Mirror.CosignerID,
+		"public_key_pem", string(mPemBytes))
 
 	upstreamKey, err := loadPEMSPKI(filepath.Join(cfg.DataDir, cfg.Mirror.Upstream.CACosignerKeyPath))
 	if err != nil {
