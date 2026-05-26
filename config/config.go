@@ -69,6 +69,7 @@ type MirrorConfig struct {
 	SignSubtreeListen           string         `json:"sign_subtree_listen"`
 	SignSubtreePath             string         `json:"sign_subtree_path"`
 	RequireCASignatureOnSubtree bool           `json:"require_ca_signature_on_subtree"`
+	CheckpointCosignatures      bool           `json:"checkpoint_cosignatures"`
 }
 
 // UpstreamConfig describes the log being mirrored.

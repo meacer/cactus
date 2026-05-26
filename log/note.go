@@ -1,6 +1,7 @@
 package log
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -50,6 +51,21 @@ func buildSignedNote(logID, cosignerID cert.TrustAnchorID,
 	out := body + "\n" // blank line separating body from signatures
 	out += "— " + cosigner + " " + sigB64 + "\n"
 	return []byte(out), nil
+}
+
+// AppendSignaturesToNote appends additional signature lines to a c2sp
+// signed-note.
+func AppendSignaturesToNote(note []byte, sigs []cert.MTCSignature) []byte {
+	var b bytes.Buffer
+	b.Write(note)
+	for _, sig := range sigs {
+		keyName := "oid/" + string(sig.CosignerID)
+		keyID := mtcCheckpointKeyID(keyName)
+		sigWithID := append(append([]byte(nil), keyID[:]...), sig.Signature...)
+		sigB64 := base64.StdEncoding.EncodeToString(sigWithID)
+		fmt.Fprintf(&b, "— %s %s\n", keyName, sigB64)
+	}
+	return b.Bytes()
 }
 
 // parseSignedNote extracts (size, root) from a signed note, ignoring
