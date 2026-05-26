@@ -7,21 +7,21 @@ GO ?= gotip
 BIN_DIR ?= bin
 
 build:
-	$(GO) build -o $(BIN_DIR)/cactus ./cmd/cactus
-	$(GO) build -o $(BIN_DIR)/cactus-cli ./cmd/cactus-cli
-	$(GO) build -o $(BIN_DIR)/cactus-keygen ./cmd/cactus-keygen
+	$(GO) build -tags mldsa -o $(BIN_DIR)/cactus ./cmd/cactus
+	$(GO) build -tags mldsa -o $(BIN_DIR)/cactus-cli ./cmd/cactus-cli
+	$(GO) build -tags mldsa -o $(BIN_DIR)/cactus-keygen ./cmd/cactus-keygen
 
 test:
-	$(GO) test ./...
+	$(GO) test -tags mldsa ./...
 
 test-race:
-	$(GO) test -race ./...
+	$(GO) test -race -tags mldsa ./...
 
 vet:
-	$(GO) vet ./...
+	$(GO) vet -tags mldsa ./...
 
 integration:
-	$(GO) test -race -count=1 -tags=integration ./integration/...
+	$(GO) test -race -count=1 -tags=integration,mldsa ./integration/...
 
 clean:
 	rm -rf $(BIN_DIR)
