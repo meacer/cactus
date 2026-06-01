@@ -39,10 +39,24 @@ func VerifyMTCSignature(key CosignerKey, sig MTCSignature, signedMessage []byte)
 	}
 	switch key.Algorithm {
 	case AlgMLDSA44, AlgMLDSA65, AlgMLDSA87:
+		if fn, ok := extraVerifiers[key.Algorithm]; ok {
+			return fn(key, sig, signedMessage)
+		}
 		return verifyMLDSA(key.Algorithm, key.PublicKey, signedMessage, sig.Signature)
 	default:
 		return fmt.Errorf("cert: algorithm 0x%04x not recognised", uint16(key.Algorithm))
 	}
+}
+
+
+// extraVerifiers is populated by build-tag-gated init() functions
+// (e.g. sigverify_mldsa.go).
+var extraVerifiers = map[SignatureAlgorithm]func(CosignerKey, MTCSignature, []byte) error{}
+
+// registerVerifier associates an algorithm with a verifier. Called
+// from init() in build-tag-gated files.
+func registerVerifier(alg SignatureAlgorithm, fn func(CosignerKey, MTCSignature, []byte) error) {
+	extraVerifiers[alg] = fn
 }
 
 // verifyMLDSA verifies a pure ML-DSA signature with an empty context

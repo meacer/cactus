@@ -176,7 +176,8 @@ func Default() Config {
 			SignSubtreePath:             "/sign-subtree",
 			RequireCASignatureOnSubtree: true,
 			Upstream: UpstreamConfig{
-				PollIntervalMS: 1000,
+				CACosignerAlgorithm: "ecdsa-p256-sha256",
+				PollIntervalMS:      1000,
 			},
 		},
 		LogLevel: "info",

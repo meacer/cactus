@@ -505,13 +505,23 @@ func startMirror(
 	if err != nil {
 		return nil, fmt.Errorf("upstream ca_cosigner_key_path: %w", err)
 	}
+	upstreamCAAlg, err := signer.ParseAlgorithm(cfg.Mirror.Upstream.CACosignerAlgorithm)
+	if err != nil {
+		return nil, fmt.Errorf("upstream ca_cosigner_algorithm: %w", err)
+
+	}
+	upstreamCAAlg, err := signer.ParseAlgorithm(cfg.Mirror.Upstream.CACosignerAlgorithm)
+	if err != nil {
+		return nil, fmt.Errorf("upstream ca_cosigner_algorithm: %w", err)
+	}
 
 	follower, err := mirror.NewFollower(mirror.FollowerConfig{
 		Upstream: mirror.Upstream{
-			TileURL:       cfg.Mirror.Upstream.TileURL,
-			LogID:         cert.TrustAnchorID(cfg.Mirror.Upstream.LogID),
-			CACosignerID:  cert.TrustAnchorID(cfg.Mirror.Upstream.CACosignerID),
-			CACosignerKey: upstreamKey,
+			TileURL:             cfg.Mirror.Upstream.TileURL,
+			LogID:               cert.TrustAnchorID(cfg.Mirror.Upstream.LogID),
+			CACosignerID:        cert.TrustAnchorID(cfg.Mirror.Upstream.CACosignerID),
+			CACosignerAlgorithm: signerAlgToCertAlg(upstreamCAAlg),
+			CACosignerKey:       upstreamKey,
 		},
 		FS:           fsRoot,
 		PollInterval: cfg.Mirror.Upstream.PollInterval(),
