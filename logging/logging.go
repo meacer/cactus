@@ -64,13 +64,21 @@ func Middleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			logger.LogAttrs(ctx, slog.LevelInfo, "http",
 				slog.String("request_id", id),
 				slog.String("method", r.Method),
-				slog.String("path", r.URL.Path),
+				slog.String("url", requestURL(r)),
 				slog.Int("status", rw.status),
 				slog.Int64("bytes", rw.bytes),
 				slog.Duration("duration", time.Since(start)),
 			)
 		})
 	}
+}
+
+func requestURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host + r.URL.RequestURI()
 }
 
 type statusRecorder struct {
