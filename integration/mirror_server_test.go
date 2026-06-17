@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -231,3 +232,202 @@ func waitFollowerCatchUp(t *testing.T, f *mirror.Follower, want uint64, dur time
 	t.Fatalf("follower never caught up: have %d want %d", got, want)
 	return 0
 }
+
+// TestMirrorCheckpointEndpoint: stand up a CA + a follower, advance
+// the follower, then request the mirror's own checkpoint endpoint
+// and verify the returned checkpoint and signatures.
+func TestMirrorCheckpointEndpoint(t *testing.T) {
+	ca := bringUp(t, t.TempDir())
+	defer ca.close()
+
+	for i := 0; i < 3; i++ {
+		if _, err := acmeIssueOne(ca.acmeBase, fmt.Sprintf("cp%d.test", i)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	mfs, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	follower, err := mirror.NewFollower(mirror.FollowerConfig{
+		Upstream: mirror.Upstream{
+			TileURL: ca.tileBase, LogID: ca.logID,
+			CACosignerID:  ca.cosigner,
+			CACosignerKey: ca.signer.PublicKey(),
+		},
+		FS: mfs, PollInterval: 25 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startFollower(t, ctx, follower)
+	caSize := waitFollowerCatchUp(t, follower, ca.log.CurrentCheckpoint().Size, 3*time.Second)
+
+	// Mirror's own cosigner key.
+	mirrorID := cert.TrustAnchorID("32473.21")
+	mSigner, mKey := mldsaCosigner(t, mirrorID, 0xCC)
+
+	srv, err := mirror.NewServer(mirror.ServerConfig{
+		Follower:                    follower,
+		Signer:                      mSigner,
+		CosignerID:                  mirrorID,
+		RequireCASignatureOnSubtree: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	origin := cert.OIDName(ca.logID)
+	checkpointPath := "/" + origin + "/checkpoint"
+
+	hSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == checkpointPath {
+			srv.HandlerCheckpoint().ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer hSrv.Close()
+
+	// Fetch the mirror's checkpoint.
+	resp, err := http.Get(hSrv.URL + checkpointPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+
+	// The checkpoint must be a signed note. Let's parse it and verify
+	// the signatures.
+	// The body should contain the CA's signature and the mirror's signature.
+	size, root, sigs, err := testParseSignedNote(body)
+	if err != nil {
+		t.Fatalf("testParseSignedNote failed: %v", err)
+	}
+	if size != caSize {
+		t.Errorf("got size %d, want %d", size, caSize)
+	}
+
+	// Expect exactly 2 signatures: one from CA, one from the mirror.
+	if len(sigs) != 2 {
+		t.Fatalf("got %d signatures, want 2", len(sigs))
+	}
+
+	// Verify both signatures.
+	caKey := cert.CosignerKey{
+		ID: ca.cosigner, Algorithm: cert.AlgMLDSA44, PublicKey: ca.signer.PublicKey(),
+	}
+	mirrorKey := cert.CosignerKey{
+		ID: mirrorID, Algorithm: cert.AlgMLDSA44, PublicKey: mKey.PublicKey,
+	}
+
+	// The signed message is the CosignedMessage for [0, size)
+	subtree := &cert.MTCSubtree{
+		LogID: ca.logID,
+		Start: 0, End: size, Hash: root,
+	}
+	msg, err := cert.MarshalSignatureInput(ca.cosigner, subtree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mirrorMsg, err := cert.MarshalSignatureInput(mirrorID, subtree)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var verifiedCA, verifiedMirror bool
+	for _, s := range sigs {
+		if s.keyName == cert.OIDName(ca.cosigner) {
+			sig := cert.MTCSignature{CosignerID: ca.cosigner, Signature: s.sig}
+			if err := cert.VerifyMTCSignature(caKey, sig, msg); err != nil {
+				t.Errorf("CA signature verification failed: %v", err)
+			} else {
+				verifiedCA = true
+			}
+		} else if s.keyName == cert.OIDName(mirrorID) {
+			sig := cert.MTCSignature{CosignerID: mirrorID, Signature: s.sig}
+			if err := cert.VerifyMTCSignature(mirrorKey, sig, mirrorMsg); err != nil {
+				t.Errorf("mirror signature verification failed: %v", err)
+			} else {
+				verifiedMirror = true
+			}
+		} else {
+			t.Errorf("unexpected signature key name %q", s.keyName)
+		}
+	}
+
+	if !verifiedCA {
+		t.Error("CA signature not found or not verified")
+	}
+	if !verifiedMirror {
+		t.Error("mirror signature not found or not verified")
+	}
+}
+
+type testNoteSig struct {
+	keyName string
+	sig     []byte
+}
+
+func testParseSignedNote(data []byte) (uint64, tlogx.Hash, []testNoteSig, error) {
+	parts := strings.SplitN(string(data), "\n\n", 2)
+	if len(parts) < 2 {
+		return 0, tlogx.Hash{}, nil, fmt.Errorf("missing separator")
+	}
+	bodyLines := strings.Split(strings.TrimRight(parts[0], "\n"), "\n")
+	if len(bodyLines) != 3 {
+		return 0, tlogx.Hash{}, nil, fmt.Errorf("bad body lines: %d", len(bodyLines))
+	}
+	size, err := strconv.ParseUint(bodyLines[1], 10, 64)
+	if err != nil {
+		return 0, tlogx.Hash{}, nil, err
+	}
+	rootBytes, err := base64.StdEncoding.DecodeString(bodyLines[2])
+	if err != nil {
+		return 0, tlogx.Hash{}, nil, err
+	}
+	var root tlogx.Hash
+	copy(root[:], rootBytes)
+
+	var sigs []testNoteSig
+	for _, line := range strings.Split(strings.TrimRight(parts[1], "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		rest, ok := strings.CutPrefix(line, "— ")
+		if !ok {
+			return 0, tlogx.Hash{}, nil, fmt.Errorf("bad sig line: %q", line)
+		}
+		fields := strings.SplitN(rest, " ", 2)
+		if len(fields) != 2 {
+			return 0, tlogx.Hash{}, nil, fmt.Errorf("bad sig format: %q", line)
+		}
+		raw, err := base64.StdEncoding.DecodeString(fields[1])
+		if err != nil {
+			return 0, tlogx.Hash{}, nil, err
+		}
+		if len(raw) < 5 {
+			return 0, tlogx.Hash{}, nil, fmt.Errorf("sig too short")
+		}
+		_, sig, err := cert.ParseTimestampedSignature(raw[4:])
+		if err != nil {
+			return 0, tlogx.Hash{}, nil, err
+		}
+		sigs = append(sigs, testNoteSig{
+			keyName: fields[0],
+			sig:     sig,
+		})
+	}
+	return size, root, sigs, nil
+}
+
+
