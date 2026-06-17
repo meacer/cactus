@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/letsencrypt/cactus/cert"
@@ -57,6 +58,11 @@ type Observer interface{ Observe(float64) }
 // Server handles POST /sign-subtree requests.
 type Server struct {
 	cfg ServerConfig
+
+	mu         sync.Mutex
+	cachedSize uint64
+	cachedRoot tlogx.Hash
+	cachedNote []byte
 }
 
 // NewServer constructs a Server. Returns an error on invalid config.
@@ -93,6 +99,94 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 func (s *Server) Handler() http.Handler {
 	return http.HandlerFunc(s.handle)
 }
+
+// HandlerCheckpoint returns the HTTP handler for the mirror's public
+// checkpoint endpoint.
+func (s *Server) HandlerCheckpoint() http.Handler {
+	return http.HandlerFunc(s.handleCheckpoint)
+}
+
+func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	size, root, signedNote := s.cfg.Follower.Current()
+	if size == 0 {
+		http.Error(w, "no checkpoint yet", http.StatusServiceUnavailable)
+		return
+	}
+
+	keyName := cert.OIDName(s.cfg.CosignerID)
+
+	// 1) If our signature is already present in the checkpoint note, serve it as-is
+	// without appending a duplicate (which also keeps the signature stable).
+	if _, _, _, err := parseSignedNote(signedNote, keyName); err == nil {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Length", strconv.Itoa(len(signedNote)))
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(signedNote)
+		}
+		return
+	}
+
+	// 2) Check our in-memory cache.
+	s.mu.Lock()
+	if s.cachedSize == size && s.cachedRoot == root && len(s.cachedNote) > 0 {
+		note := s.cachedNote
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Length", strconv.Itoa(len(note)))
+		if r.Method == http.MethodGet {
+			_, _ = w.Write(note)
+		}
+		return
+	}
+	s.mu.Unlock()
+
+	// 3) Sign the checkpoint using the mirror's key.
+	subtree := &cert.MTCSubtree{
+		LogID: s.cfg.Follower.cfg.Upstream.LogID,
+		Start: 0, End: size, Hash: root,
+	}
+	msg, err := cert.MarshalSignatureInput(s.cfg.CosignerID, subtree)
+	if err != nil {
+		http.Error(w, "marshal sig input: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sig, err := s.cfg.Signer.Sign(rand.Reader, msg)
+	if err != nil {
+		http.Error(w, "sign: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	keyID, err := cert.CosignatureKeyID(keyName,
+		cert.SignatureAlgorithm(s.cfg.Signer.Algorithm()), s.cfg.Signer.PublicKey())
+	if err != nil {
+		http.Error(w, "key id: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sigWithID := append(append([]byte(nil), keyID[:]...), cert.MarshalTimestampedSignature(0, sig)...)
+	line := fmt.Sprintf("%s %s %s\n", emDash, keyName, base64.StdEncoding.EncodeToString(sigWithID))
+
+	// Append the mirror's signature to the signed note.
+	mirrorSignedNote := append(append([]byte(nil), signedNote...), []byte(line)...)
+
+	// 4) Update the cache.
+	s.mu.Lock()
+	s.cachedSize = size
+	s.cachedRoot = root
+	s.cachedNote = mirrorSignedNote
+	s.mu.Unlock()
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Content-Length", strconv.Itoa(len(mirrorSignedNote)))
+	if r.Method == http.MethodGet {
+		_, _ = w.Write(mirrorSignedNote)
+	}
+}
+
 
 // MaxRequestBytes caps the sign-subtree request body. A subtree note
 // (a few hundred bytes), a checkpoint note (a few hundred bytes), and
