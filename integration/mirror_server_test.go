@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -430,4 +431,96 @@ func testParseSignedNote(data []byte) (uint64, tlogx.Hash, []testNoteSig, error)
 	return size, root, sigs, nil
 }
 
+// TestMirrorConfigEndpoint verifies that the /config endpoint correctly
+// returns the mirror's public key (PEM and raw) and the list of upstream logs.
+func TestMirrorConfigEndpoint(t *testing.T) {
+	mfs, err := storage.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 
+	upstreamTileURL := "http://127.0.0.1:14080/1"
+	upstreamLogID := cert.TrustAnchorID("44363.47.1.99.0.1")
+	upstreamCACosignerID := cert.TrustAnchorID("44363.47.1.99")
+
+	// CA cosigner key doesn't need to be real for config test, just non-empty
+	caKey := []byte("fake-ca-key-fake-ca-key-fake-ca-key-fake-ca-key")
+
+	follower, err := mirror.NewFollower(mirror.FollowerConfig{
+		Upstream: mirror.Upstream{
+			TileURL:       upstreamTileURL,
+			LogID:         upstreamLogID,
+			CACosignerID:  upstreamCACosignerID,
+			CACosignerKey: caKey,
+		},
+		FS:           mfs,
+		PollInterval: 25 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mirrorID := cert.TrustAnchorID("32473.21")
+	mSigner, _ := mldsaCosigner(t, mirrorID, 0xCC)
+
+	srv, err := mirror.NewServer(mirror.ServerConfig{
+		Follower:   follower,
+		Signer:     mSigner,
+		CosignerID: mirrorID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/config" {
+			srv.HandlerConfig().ServeHTTP(w, r)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer hSrv.Close()
+
+	resp, err := http.Get(hSrv.URL + "/config")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	}
+
+	var jsonResp map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&jsonResp); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify public key is returned
+	pubPEM, ok := jsonResp["public_key_pem"].(string)
+	if !ok || !strings.Contains(pubPEM, "-----BEGIN PUBLIC KEY-----") {
+		t.Errorf("missing or invalid public_key_pem in response: %v", jsonResp["public_key_pem"])
+	}
+
+	pubBytesBase64, ok := jsonResp["public_key"].(string)
+	if !ok || len(pubBytesBase64) == 0 {
+		t.Errorf("missing or invalid public_key in response: %v", jsonResp["public_key"])
+	}
+
+	// Verify upstreams list
+	upstreams, ok := jsonResp["upstreams"].([]interface{})
+	if !ok || len(upstreams) != 1 {
+		t.Fatalf("expected 1 upstream log, got %d in response: %v", len(upstreams), jsonResp["upstreams"])
+	}
+
+	u := upstreams[0].(map[string]interface{})
+	if u["tile_url"] != upstreamTileURL {
+		t.Errorf("expected tile_url %q, got %q", upstreamTileURL, u["tile_url"])
+	}
+	if u["log_id"] != string(upstreamLogID) {
+		t.Errorf("expected log_id %q, got %q", upstreamLogID, u["log_id"])
+	}
+	if u["ca_cosigner_id"] != string(upstreamCACosignerID) {
+		t.Errorf("expected ca_cosigner_id %q, got %q", upstreamCACosignerID, u["ca_cosigner_id"])
+	}
+}

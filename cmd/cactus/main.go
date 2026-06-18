@@ -545,12 +545,13 @@ func startMirror(
 	mux := http.NewServeMux()
 	mux.Handle(cfg.Mirror.SignSubtreePath, mSrv.Handler())
 	origin := cert.OIDName(cert.TrustAnchorID(cfg.Mirror.Upstream.LogID))
-	
+
 	// C2SP spec requires percent-encoded origin. Go's http.ServeMux does not unescape
 	// %2F to / before routing, so we must register both escaped and unescaped versions.
 	mux.Handle("GET /"+origin+"/checkpoint", mSrv.HandlerCheckpoint())
 	mux.Handle("GET /"+strings.ReplaceAll(origin, "/", "%2F")+"/checkpoint", mSrv.HandlerCheckpoint())
-	
+	mux.Handle("GET /config", mSrv.HandlerConfig())
+
 	return &http.Server{
 		Addr:              cfg.Mirror.SignSubtreeListen,
 		Handler:           logging.Middleware(logger)(mux),

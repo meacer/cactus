@@ -7,6 +7,8 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +22,18 @@ import (
 	"github.com/letsencrypt/cactus/signer"
 	"github.com/letsencrypt/cactus/tlogx"
 )
+
+type configResponse struct {
+	PublicKeyPEM string             `json:"public_key_pem"`
+	PublicKey    string             `json:"public_key"` // base64-encoded raw bytes
+	Upstreams    []upstreamResponse `json:"upstreams"`
+}
+
+type upstreamResponse struct {
+	TileURL      string `json:"tile_url"`
+	LogID        string `json:"log_id"`
+	CACosignerID string `json:"ca_cosigner_id"`
+}
 
 // ServerConfig configures the mirror's sign-subtree HTTP endpoint.
 type ServerConfig struct {
@@ -106,6 +120,48 @@ func (s *Server) HandlerCheckpoint() http.Handler {
 	return http.HandlerFunc(s.handleCheckpoint)
 }
 
+// HandlerConfig returns the HTTP handler for the mirror's status/config endpoint.
+func (s *Server) HandlerConfig() http.Handler {
+	return http.HandlerFunc(s.handleConfig)
+}
+
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	pubBytes := s.cfg.Signer.PublicKey()
+	pubPEM := pem.EncodeToMemory(&pem.Block{
+		Type:  "PUBLIC KEY",
+		Bytes: pubBytes,
+	})
+
+	upstream := s.cfg.Follower.cfg.Upstream
+	resp := configResponse{
+		PublicKeyPEM: string(pubPEM),
+		PublicKey:    base64.StdEncoding.EncodeToString(pubBytes),
+		Upstreams: []upstreamResponse{
+			{
+				TileURL:      upstream.TileURL,
+				LogID:        string(upstream.LogID),
+				CACosignerID: string(upstream.CACosignerID),
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, max-age=0")
+	if r.Method == http.MethodGet {
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(resp); err != nil {
+			// Failed to encode json. Standard behavior is to let it fail or log.
+		}
+	}
+}
+
 func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
@@ -186,7 +242,6 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(mirrorSignedNote)
 	}
 }
-
 
 // MaxRequestBytes caps the sign-subtree request body. A subtree note
 // (a few hundred bytes), a checkpoint note (a few hundred bytes), and
