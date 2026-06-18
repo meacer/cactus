@@ -28,6 +28,8 @@ import (
 var indexHTML []byte
 
 type configResponse struct {
+	CosignerID   string             `json:"cosigner_id"`
+	Algorithm    string             `json:"algorithm"`
 	PublicKeyPEM string             `json:"public_key_pem"`
 	PublicKey    string             `json:"public_key"` // base64-encoded raw bytes
 	Upstreams    []upstreamResponse `json:"upstreams"`
@@ -163,6 +165,8 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 
 	upstream := s.cfg.Follower.cfg.Upstream
 	resp := configResponse{
+		CosignerID:   string(s.cfg.CosignerID),
+		Algorithm:    s.cfg.Signer.Algorithm().String(),
 		PublicKeyPEM: string(pubPEM),
 		PublicKey:    base64.StdEncoding.EncodeToString(pubBytes),
 		Upstreams: []upstreamResponse{

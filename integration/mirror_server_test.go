@@ -534,6 +534,18 @@ func TestMirrorConfigEndpoint(t *testing.T) {
 		t.Errorf("missing or invalid public_key in response: %v", jsonResp["public_key"])
 	}
 
+	// Verify cosigner_id and algorithm are returned
+	cosignerID, ok := jsonResp["cosigner_id"].(string)
+	if !ok || cosignerID != string(mirrorID) {
+		t.Errorf("expected cosigner_id %q, got %v", mirrorID, jsonResp["cosigner_id"])
+	}
+
+	alg, ok := jsonResp["algorithm"].(string)
+	if !ok || alg != "mldsa-44" {
+		t.Errorf("expected algorithm %q, got %v", "mldsa-44", jsonResp["algorithm"])
+	}
+
+
 	// Verify upstreams list
 	upstreams, ok := jsonResp["upstreams"].([]interface{})
 	if !ok || len(upstreams) != 1 {
