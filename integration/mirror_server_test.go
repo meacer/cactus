@@ -477,10 +477,37 @@ func TestMirrorConfigEndpoint(t *testing.T) {
 			srv.HandlerConfig().ServeHTTP(w, r)
 			return
 		}
+		if r.URL.Path == "/" {
+			srv.HandlerIndex().ServeHTTP(w, r)
+			return
+		}
 		http.NotFound(w, r)
 	}))
 	defer hSrv.Close()
 
+	// Test GET /
+	dashboardResp, err := http.Get(hSrv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dashboardResp.Body.Close()
+
+	if dashboardResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 for dashboard, got %d", dashboardResp.StatusCode)
+	}
+	dashboardCT := dashboardResp.Header.Get("Content-Type")
+	if !strings.Contains(dashboardCT, "text/html") {
+		t.Errorf("expected text/html for dashboard, got %q", dashboardCT)
+	}
+	dashboardBody, err := io.ReadAll(dashboardResp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dashboardBody), "cactus mirror") {
+		t.Errorf("expected dashboard body to contain title, got: %s", string(dashboardBody))
+	}
+
+	// Test GET /config
 	resp, err := http.Get(hSrv.URL + "/config")
 	if err != nil {
 		t.Fatal(err)

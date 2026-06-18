@@ -551,6 +551,7 @@ func startMirror(
 	mux.Handle("GET /"+origin+"/checkpoint", mSrv.HandlerCheckpoint())
 	mux.Handle("GET /"+strings.ReplaceAll(origin, "/", "%2F")+"/checkpoint", mSrv.HandlerCheckpoint())
 	mux.Handle("GET /config", mSrv.HandlerConfig())
+	mux.Handle("GET /{$}", mSrv.HandlerIndex())
 
 	return &http.Server{
 		Addr:              cfg.Mirror.SignSubtreeListen,

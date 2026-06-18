@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
@@ -22,6 +23,9 @@ import (
 	"github.com/letsencrypt/cactus/signer"
 	"github.com/letsencrypt/cactus/tlogx"
 )
+
+//go:embed index.html
+var indexHTML []byte
 
 type configResponse struct {
 	PublicKeyPEM string             `json:"public_key_pem"`
@@ -124,6 +128,25 @@ func (s *Server) HandlerCheckpoint() http.Handler {
 func (s *Server) HandlerConfig() http.Handler {
 	return http.HandlerFunc(s.handleConfig)
 }
+
+// HandlerIndex returns the HTTP handler for the mirror's root dashboard page.
+func (s *Server) HandlerIndex() http.Handler {
+	return http.HandlerFunc(s.handleIndex)
+}
+
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache, max-age=0")
+	if r.Method == http.MethodGet {
+		w.Write(indexHTML)
+	}
+}
+
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
