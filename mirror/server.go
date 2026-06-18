@@ -177,9 +177,15 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pubBytes := s.cfg.Signer.PublicKey()
+	alg := cert.SignatureAlgorithm(s.cfg.Signer.Algorithm())
+	spkiBytes, err := cert.MarshalCosignerSPKI(alg, pubBytes)
+	if err != nil {
+		http.Error(w, "marshal public key SPKI: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 	pubPEM := pem.EncodeToMemory(&pem.Block{
 		Type:  "PUBLIC KEY",
-		Bytes: pubBytes,
+		Bytes: spkiBytes,
 	})
 
 	upstream := s.cfg.Follower.cfg.Upstream
@@ -187,7 +193,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 		CosignerID:   string(s.cfg.CosignerID),
 		Algorithm:    s.cfg.Signer.Algorithm().String(),
 		PublicKeyPEM: string(pubPEM),
-		PublicKey:    base64.StdEncoding.EncodeToString(pubBytes),
+		PublicKey:    base64.StdEncoding.EncodeToString(spkiBytes),
 		Upstreams: []upstreamResponse{
 			{
 				TileURL:      upstream.TileURL,
