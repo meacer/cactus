@@ -284,33 +284,45 @@ func TestMirrorCheckpointEndpoint(t *testing.T) {
 	origin := cert.OIDName(ca.logID)
 	checkpointPath := "/" + origin + "/checkpoint"
 
-	hSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == checkpointPath {
-			srv.HandlerCheckpoint().ServeHTTP(w, r)
-			return
-		}
-		http.NotFound(w, r)
-	}))
+	mux := http.NewServeMux()
+	mux.Handle("GET "+checkpointPath, srv.HandlerCheckpoint())
+	hSrv := httptest.NewServer(mirror.UnescapeSlashMiddleware(mux))
 	defer hSrv.Close()
 
-	// Fetch the mirror's checkpoint.
-	resp, err := http.Get(hSrv.URL + checkpointPath)
-	if err != nil {
-		t.Fatal(err)
+	// Test three path variations (standard, %2F, and %2f) to verify that the
+	// UnescapeSlashMiddleware correctly normalizes percent-encoded slashes.
+	pathsToTest := []string{
+		checkpointPath,
+		"/" + strings.ReplaceAll(checkpointPath[1:], "/", "%2F"),
+		"/" + strings.ReplaceAll(checkpointPath[1:], "/", "%2f"),
 	}
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+
+	var firstBody []byte
+	for _, p := range pathsToTest {
+		resp, err := http.Get(hSrv.URL + p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != 200 {
+			t.Fatalf("path %q: status = %d, body = %s", p, resp.StatusCode, body)
+		}
+
+		if firstBody == nil {
+			firstBody = body
+		} else if !bytes.Equal(firstBody, body) {
+			t.Errorf("path %q returned different body from first path", p)
+		}
 	}
 
 	// The checkpoint must be a signed note. Let's parse it and verify
 	// the signatures.
 	// The body should contain the CA's signature and the mirror's signature.
-	size, root, sigs, err := testParseSignedNote(body)
+	size, root, sigs, err := testParseSignedNote(firstBody)
 	if err != nil {
 		t.Fatalf("testParseSignedNote failed: %v", err)
 	}

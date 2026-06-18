@@ -148,6 +148,17 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		w.Write(indexHTML)
 	}
 }
+// UnescapeSlashMiddleware is a middleware that rewrites percent-encoded slashes (%2F or %2f)
+// to regular slashes in the request path, so that Go's ServeMux can match them against
+// standard unescaped patterns.
+func UnescapeSlashMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.RawPath, "%2F") || strings.Contains(r.URL.RawPath, "%2f") {
+			r.URL.RawPath = ""
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
