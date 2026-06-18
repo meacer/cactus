@@ -153,8 +153,16 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 // standard unescaped patterns.
 func UnescapeSlashMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// 1) If RawPath contains percent-encoded slashes, Go's ServeMux will try
+		// to match against the raw segments, which fails for unescaped patterns.
+		// Clearing RawPath forces it to use the unescaped Path.
 		if strings.Contains(r.URL.RawPath, "%2F") || strings.Contains(r.URL.RawPath, "%2f") {
 			r.URL.RawPath = ""
+		}
+		// 2) In case the path itself still contains percent-encoded slashes (e.g.
+		// due to proxy rewriting or custom forwarding), normalize them to regular slashes.
+		if strings.Contains(r.URL.Path, "%2F") || strings.Contains(r.URL.Path, "%2f") {
+			r.URL.Path = strings.ReplaceAll(strings.ReplaceAll(r.URL.Path, "%2F", "/"), "%2f", "/")
 		}
 		next.ServeHTTP(w, r)
 	})
