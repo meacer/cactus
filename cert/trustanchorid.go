@@ -38,6 +38,16 @@ const TrustAnchorOIDBase = "1.3.6.1.4.1"
 // log_origin (§5.3.1). It precedes the full dotted-decimal OID.
 const OIDNamePrefix = "oid/"
 
+// ParseOIDName is the inverse of OIDName: it parses a full "oid/" name
+// back to the canonical relative-ASCII TrustAnchorID.
+func ParseOIDName(name string) (TrustAnchorID, error) {
+	fullPrefix := OIDNamePrefix + TrustAnchorOIDBase + "."
+	if !strings.HasPrefix(name, fullPrefix) {
+		return nil, fmt.Errorf("cert: invalid OID name prefix: %q", name)
+	}
+	return TrustAnchorID(strings.TrimPrefix(name, fullPrefix)), nil
+}
+
 // Binary returns the trust anchor ID's binary representation per Section
 // 3 of draft-ietf-tls-trust-anchor-ids: the DER content octets of the
 // RELATIVE-OID (X.690 §8.20), i.e. each arc base-128 encoded with the

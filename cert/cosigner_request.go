@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +23,9 @@ type MirrorEndpoint struct {
 	// URL is the mirror's sign-subtree endpoint (e.g.
 	// "https://mirror-1.example/sign-subtree").
 	URL string
+	// CheckpointURL is the mirror's add-checkpoint endpoint (e.g.
+	// "https://mirror-1.example/add-checkpoint").
+	CheckpointURL string
 	// Key is the mirror's cosigner identity + public key. Used to
 	// verify the response signature with VerifyMTCSignature.
 	Key CosignerKey
@@ -147,6 +152,7 @@ func RequestCosignaturesWithMetrics(
 				mx.Requests.WithLabelValues(string(m.Key.ID), result).Add(1)
 			}
 			if err != nil {
+				slog.Error("requestOne failed", "err", err, "mirror", m.Key.ID)
 				return
 			}
 			select {
@@ -254,6 +260,155 @@ func requestOne(ctx context.Context, m MirrorEndpoint, body []byte, subtree *MTC
 		}
 		sig := MTCSignature{CosignerID: m.Key.ID, Signature: rawSig}
 		if err := VerifyMTCSignature(m.Key, sig, msg); err != nil {
+			slog.Error("mirror signature verification failed", "err", err, "mirror", m.Key.ID)
+			return MTCSignature{}, fmt.Errorf("verify: %w", err)
+		}
+		return sig, nil
+	}
+	return MTCSignature{}, errors.New("no matching signature line in response")
+}
+
+// RequestCheckpointSignatures sends the checkpoint and consistency proof to
+// all configured mirrors and returns the collected signatures.
+func RequestCheckpointSignatures(
+	ctx context.Context,
+	oldSize uint64,
+	proof []tlogx.Hash,
+	checkpointNote []byte,
+	mirrors []MirrorEndpoint,
+) ([]MTCSignature, error) {
+	var collected []MTCSignature
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// Construct request body per tlog-witness.md
+	var b bytes.Buffer
+	fmt.Fprintf(&b, "old %d\n", oldSize)
+	for _, h := range proof {
+		b.WriteString(base64.StdEncoding.EncodeToString(h[:]) + "\n")
+	}
+	b.WriteString("\n")
+	b.Write(checkpointNote)
+	reqBody := b.Bytes()
+
+	for _, m := range mirrors {
+		if m.CheckpointURL == "" {
+			continue
+		}
+		wg.Add(1)
+		go func(m MirrorEndpoint) {
+			defer wg.Done()
+			sig, err := requestOneCheckpoint(ctx, m, reqBody)
+			if err != nil {
+				slog.Error("requestOneCheckpoint failed", "err", err, "mirror", m.Key.ID)
+				return
+			}
+			mu.Lock()
+			collected = append(collected, sig)
+			mu.Unlock()
+		}(m)
+	}
+	wg.Wait()
+
+	return collected, nil
+}
+
+func requestOneCheckpoint(ctx context.Context, m MirrorEndpoint, body []byte) (MTCSignature, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.CheckpointURL, bytes.NewReader(body))
+	if err != nil {
+		return MTCSignature{}, err
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return MTCSignature{}, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 16*1024))
+	if err != nil {
+		return MTCSignature{}, err
+	}
+	if resp.StatusCode != 200 {
+		return MTCSignature{}, fmt.Errorf("HTTP %d: %s", resp.StatusCode, respBody)
+	}
+
+	// Extract checkpoint body for verification
+	parts := bytes.SplitN(body, []byte("\n\n"), 2)
+	if len(parts) < 2 {
+		return MTCSignature{}, errors.New("invalid request body")
+	}
+	checkpoint := parts[1]
+
+	noteParts := bytes.SplitN(checkpoint, []byte("\n\n"), 2)
+	if len(noteParts) < 1 {
+		return MTCSignature{}, errors.New("invalid checkpoint note")
+	}
+	noteBodyLines := strings.Split(strings.TrimRight(string(noteParts[0]), "\n"), "\n")
+	if len(noteBodyLines) != 3 {
+		return MTCSignature{}, errors.New("invalid checkpoint note body")
+	}
+	logID, err := ParseOIDName(noteBodyLines[0])
+	if err != nil {
+		return MTCSignature{}, fmt.Errorf("invalid checkpoint origin: %w", err)
+	}
+	newSize, err := strconv.ParseUint(noteBodyLines[1], 10, 64)
+	if err != nil {
+		return MTCSignature{}, fmt.Errorf("invalid checkpoint size: %w", err)
+	}
+	newRootBytes, err := base64.StdEncoding.DecodeString(noteBodyLines[2])
+	if err != nil {
+		return MTCSignature{}, fmt.Errorf("invalid checkpoint root: %w", err)
+	}
+	var newRoot tlogx.Hash
+	copy(newRoot[:], newRootBytes)
+
+	st := MTCSubtree{
+		LogID: logID,
+		Start: 0,
+		End:   newSize,
+		Hash:  newRoot,
+	}
+	msg, err := MarshalSignatureInput(m.Key.ID, &st)
+	if err != nil {
+		return MTCSignature{}, fmt.Errorf("build signature input: %w", err)
+	}
+
+	wantKey := OIDName(m.Key.ID)
+	wantKeyID, err := MTCCheckpointKeyID(wantKey, m.Key.Algorithm, m.Key.PublicKey)
+	if err != nil {
+		return MTCSignature{}, err
+	}
+	prefix := "— " + wantKey + " "
+	for _, line := range strings.Split(strings.TrimRight(string(respBody), "\n"), "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(line, prefix))
+		if err != nil {
+			return MTCSignature{}, fmt.Errorf("decode sig: %w", err)
+		}
+		if len(raw) < 5 {
+			return MTCSignature{}, errors.New("sig too short")
+		}
+		if [4]byte(raw[:4]) != wantKeyID {
+			continue // same name, different key ID: ignore.
+		}
+		ts, rawSig, err := ParseTimestampedSignature(raw[4:])
+		if err != nil {
+			return MTCSignature{}, fmt.Errorf("parse timestamped signature: %w", err)
+		}
+		if ts != 0 {
+			return MTCSignature{}, fmt.Errorf("cert: mirror cosignature has non-zero timestamp %d", ts)
+		}
+
+		sig := MTCSignature{
+			CosignerID:      m.Key.ID,
+			Signature:       rawSig,
+			CheckpointKeyID: wantKeyID,
+		}
+		// Verify against the CosignedMessage
+		if err := VerifyMTCSignature(m.Key, sig, msg); err != nil {
+			slog.Error("mirror checkpoint signature verification failed", "err", err, "mirror", m.Key.ID)
 			return MTCSignature{}, fmt.Errorf("verify: %w", err)
 		}
 		return sig, nil

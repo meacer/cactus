@@ -1,6 +1,7 @@
 package log
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -52,17 +53,31 @@ func buildSignedNote(logID, cosignerID cert.TrustAnchorID,
 	return []byte(out), nil
 }
 
+// AppendSignaturesToNote appends additional signature lines to a c2sp
+// signed-note.
+func AppendSignaturesToNote(note []byte, sigs []cert.MTCSignature) []byte {
+	var b bytes.Buffer
+	b.Write(note)
+	for _, sig := range sigs {
+		keyName := "oid/" + string(sig.CosignerID)
+		sigWithID := append(append([]byte(nil), sig.CheckpointKeyID[:]...), sig.Signature...)
+		sigB64 := base64.StdEncoding.EncodeToString(sigWithID)
+		fmt.Fprintf(&b, "— %s %s\n", keyName, sigB64)
+	}
+	return b.Bytes()
+}
+
 // parseSignedNote extracts (size, root) from a signed note, ignoring
 // signatures. logID is verified against the origin line.
 func parseSignedNote(data []byte, logID cert.TrustAnchorID) (uint64, tlogx.Hash, error) {
-	size, root, _, err := parseSignedNoteFull(data, logID)
+	size, root, _, err := ParseSignedNoteFull(data, logID)
 	return size, root, err
 }
 
-// parseSignedNoteFull is like parseSignedNote but also returns the raw
+// ParseSignedNoteFull is like parseSignedNote but also returns the raw
 // signature records (each is keyName + base64-decoded sig-with-keyID
 // bytes). Used by the loaded-checkpoint verification path.
-func parseSignedNoteFull(data []byte, logID cert.TrustAnchorID) (uint64, tlogx.Hash, []parsedNoteSig, error) {
+func ParseSignedNoteFull(data []byte, logID cert.TrustAnchorID) (uint64, tlogx.Hash, []ParsedNoteSig, error) {
 	s := string(data)
 	parts := strings.SplitN(s, "\n\n", 2)
 	if len(parts) < 1 {
@@ -95,7 +110,7 @@ func parseSignedNoteFull(data []byte, logID cert.TrustAnchorID) (uint64, tlogx.H
 	var root tlogx.Hash
 	copy(root[:], rootBytes)
 
-	var sigs []parsedNoteSig
+	var sigs []ParsedNoteSig
 	if len(parts) == 2 {
 		for _, line := range strings.Split(parts[1], "\n") {
 			if line == "" {
@@ -120,18 +135,18 @@ func parseSignedNoteFull(data []byte, logID cert.TrustAnchorID) (uint64, tlogx.H
 			if err != nil {
 				return 0, tlogx.Hash{}, nil, fmt.Errorf("parseSignedNote: %w", err)
 			}
-			sigs = append(sigs, parsedNoteSig{
-				keyName: fields[0],
-				keyID:   [4]byte{raw[0], raw[1], raw[2], raw[3]},
-				sig:     bareSig,
+			sigs = append(sigs, ParsedNoteSig{
+				KeyName: fields[0],
+				KeyID:   [4]byte{raw[0], raw[1], raw[2], raw[3]},
+				Sig:     bareSig,
 			})
 		}
 	}
 	return size, root, sigs, nil
 }
 
-type parsedNoteSig struct {
-	keyName string
-	keyID   [4]byte
-	sig     []byte
+type ParsedNoteSig struct {
+	KeyName string
+	KeyID   [4]byte
+	Sig     []byte
 }

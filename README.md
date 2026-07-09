@@ -336,6 +336,7 @@ subtree cosignature it requires must likewise be ML-DSA-44.
     }
   ],
   "min_signatures": 1,
+  "checkpoint_cosignatures": true,
   "request_timeout_ms": 2000,
   "best_effort_after_minimum": true,
   "mirror_retry_deadline_ms": 5000
@@ -344,7 +345,7 @@ subtree cosignature it requires must likewise be ML-DSA-44.
 
 When set, every flush fires a parallel sign-subtree request to all
 listed mirrors; the issuance waits for at least `min_signatures`
-mirror sigs to arrive before `Wait` returns. The retry deadline lets
+mirror sigs to arrive before `Wait` returns. When `checkpoint_cosignatures` is true, the CA also requests tlog-witness checkpoint cosignatures from each mirror's `/add-checkpoint` endpoint after publishing a checkpoint and appends them to the checkpoint note on disk. The retry deadline lets
 the requester poll-and-retry while mirrors catch up to the new
 checkpoint (mirrors can't sign a subtree until they've verified the
 checkpoint that contains it).

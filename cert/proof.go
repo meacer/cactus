@@ -85,6 +85,9 @@ func MarshalSignatureInput(cosignerID TrustAnchorID, subtree *MTCSubtree) ([]byt
 type MTCSignature struct {
 	CosignerID TrustAnchorID
 	Signature  []byte
+	// CheckpointKeyID is the 4-byte c2sp signed-note key ID.
+	// Only used for checkpoint signatures; ignored in MTC proofs.
+	CheckpointKeyID [4]byte
 }
 
 // MTCProof is the §6.1 signatureValue contents — emitted raw into the

@@ -77,6 +77,16 @@ type Config struct {
 		caSig cert.MTCSignature,
 	) ([]cert.MTCSignature, error)
 
+	// CheckpointWitnessRequester, if set, is invoked for the just-published
+	// checkpoint to collect witness signatures. Runs in a background
+	// goroutine. Sigs returned here are appended to the checkpoint file.
+	CheckpointWitnessRequester func(
+		ctx context.Context,
+		oldSize uint64,
+		proof []tlogx.Hash,
+		checkpointNote []byte,
+	) ([]cert.MTCSignature, error)
+
 	// WaitForCosigners, if > 0, makes Wait block until the entry's
 	// covering subtree has accumulated at least this many signatures
 	// (CA + mirrors), or until ctx fires. With the default of 0,
@@ -528,6 +538,29 @@ func (l *Log) flush() error {
 		capturedSize := newSize
 		go l.collectMirrorSigs(toRequest, capturedNote, capturedSize)
 	}
+	if l.cfg.CheckpointWitnessRequester != nil {
+		var proof []tlogx.Hash
+		var err error
+		if prevSize > 0 {
+			hr := hashesAsTlog(l.tw.SnapshotHashes())
+			proof, err = tlogx.GenerateConsistencyProof(
+				sha256Hash, 0, prevSize, newSize,
+				func(i uint64) (tlogx.Hash, error) {
+					hs, err := hr.ReadHashes([]int64{tlog.StoredHashIndex(0, int64(i))})
+					if err != nil {
+						return tlogx.Hash{}, err
+					}
+					return tlogx.Hash(hs[0]), nil
+				},
+			)
+		}
+		if err != nil {
+			l.cfg.Logger.Error("failed to generate consistency proof for checkpoint", "err", err)
+		} else {
+			capturedNote := append([]byte(nil), signedNote...)
+			go l.collectMirrorCheckpointSigs(capturedNote, prevSize, newSize, proof)
+		}
+	}
 	return nil
 }
 
@@ -576,6 +609,40 @@ func (l *Log) collectMirrorSigs(subs []signedSubtree, signedNote []byte, atSize 
 	_ = signedNote
 }
 
+// collectMirrorCheckpointSigs invokes CheckpointWitnessRequester for the
+// just-committed checkpoint and appends the returned signatures to the
+// checkpoint file.
+func (l *Log) collectMirrorCheckpointSigs(signedNote []byte, oldSize, newSize uint64, proof []tlogx.Hash) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	sigs, err := l.cfg.CheckpointWitnessRequester(ctx, oldSize, proof, signedNote)
+	if err != nil {
+		l.cfg.Logger.Error("CheckpointWitnessRequester failed", "err", err)
+		return
+	}
+	if len(sigs) == 0 {
+		return
+	}
+
+	// Append signatures to note.
+	updatedNote := AppendSignaturesToNote(signedNote, sigs)
+
+	// Persist updated note.
+	l.mu.Lock()
+	if l.committed != nil && l.committed.size == newSize {
+		l.committed.signedNote = updatedNote
+		err = l.cfg.FS.Put("log/checkpoint", updatedNote, false)
+		if err != nil {
+			l.cfg.Logger.Error("failed to persist updated checkpoint", "err", err)
+		} else {
+			close(l.notify)
+			l.notify = make(chan struct{})
+		}
+	}
+	l.mu.Unlock()
+}
+
 func (l *Log) signSubtree(st *cert.MTCSubtree) (cert.MTCSignature, error) {
 	msg, err := cert.MarshalSignatureInput(l.cfg.CosignerID, st)
 	if err != nil {
@@ -616,7 +683,7 @@ func (l *Log) loadCheckpoint() error {
 	if err != nil {
 		return err
 	}
-	size, root, sigs, err := parseSignedNoteFull(data, l.cfg.LogID)
+	size, root, sigs, err := ParseSignedNoteFull(data, l.cfg.LogID)
 	if err != nil {
 		return fmt.Errorf("parse stored checkpoint: %w", err)
 	}
@@ -642,17 +709,17 @@ func (l *Log) loadCheckpoint() error {
 // loaded signed-note is from our configured CA cosigner over the
 // reconstructed §5.3.1 CosignedMessage for [0, size). Any
 // other sigs (mirrors) are not checked here.
-func (l *Log) verifyLoadedCheckpointSig(size uint64, root tlogx.Hash, sigs []parsedNoteSig) error {
+func (l *Log) verifyLoadedCheckpointSig(size uint64, root tlogx.Hash, sigs []ParsedNoteSig) error {
 	cosignerKeyName := cert.OIDName(l.cfg.CosignerID)
 	wantKeyID, err := cert.CosignatureKeyID(cosignerKeyName,
 		cert.SignatureAlgorithm(l.cfg.Signer.Algorithm()), l.cfg.Signer.PublicKey())
 	if err != nil {
 		return fmt.Errorf("checkpoint cosigner key ID: %w", err)
 	}
-	var sig parsedNoteSig
+	var sig ParsedNoteSig
 	found := false
 	for _, s := range sigs {
-		if s.keyName == cosignerKeyName && s.keyID == wantKeyID {
+		if s.KeyName == cosignerKeyName && s.KeyID == wantKeyID {
 			sig = s
 			found = true
 			break
@@ -674,7 +741,7 @@ func (l *Log) verifyLoadedCheckpointSig(size uint64, root tlogx.Hash, sigs []par
 		Algorithm: cert.SignatureAlgorithm(l.cfg.Signer.Algorithm()),
 		PublicKey: l.cfg.Signer.PublicKey(),
 	}
-	mtcSig := cert.MTCSignature{CosignerID: l.cfg.CosignerID, Signature: sig.sig}
+	mtcSig := cert.MTCSignature{CosignerID: l.cfg.CosignerID, Signature: sig.Sig}
 	return cert.VerifyMTCSignature(key, mtcSig, msg)
 }
 

@@ -58,6 +58,9 @@ type ServerConfig struct {
 	UpstreamCAKey *cert.CosignerKey
 	// Metrics are optional; nil-safe.
 	Metrics ServerMetrics
+	// CheckpointCosignatures enables the tlog-witness add-checkpoint
+	// endpoint and signing of checkpoints.
+	CheckpointCosignatures bool
 }
 
 // ServerMetrics are optional Prometheus instruments the Server
@@ -136,6 +139,12 @@ func (s *Server) HandlerIndex() http.Handler {
 	return http.HandlerFunc(s.handleIndex)
 }
 
+// HandlerAddCheckpoint returns the HTTP handler for the tlog-witness
+// add-checkpoint endpoint.
+func (s *Server) HandlerAddCheckpoint() http.Handler {
+	return http.HandlerFunc(s.handleAddCheckpoint)
+}
+
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", "GET, HEAD")
@@ -148,6 +157,7 @@ func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 		w.Write(indexHTML)
 	}
 }
+
 // UnescapeSlashMiddleware is a middleware that rewrites percent-encoded slashes (%2F or %2f)
 // to regular slashes in the request path, so that Go's ServeMux can match them against
 // standard unescaped patterns.
@@ -167,7 +177,6 @@ func UnescapeSlashMiddleware(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 	})
 }
-
 
 func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
@@ -269,8 +278,7 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	keyID, err := cert.CosignatureKeyID(keyName,
-		cert.SignatureAlgorithm(s.cfg.Signer.Algorithm()), s.cfg.Signer.PublicKey())
+	keyID, err := cert.MTCCheckpointKeyID(keyName, cert.SignatureAlgorithm(s.cfg.Signer.Algorithm()), s.cfg.Signer.PublicKey())
 	if err != nil {
 		http.Error(w, "key id: "+err.Error(), http.StatusInternalServerError)
 		return
@@ -293,6 +301,150 @@ func (s *Server) handleCheckpoint(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		_, _ = w.Write(mirrorSignedNote)
 	}
+}
+
+func (s *Server) handleAddCheckpoint(w http.ResponseWriter, r *http.Request) {
+	if !s.cfg.CheckpointCosignatures {
+		http.Error(w, "checkpoint cosignatures disabled", http.StatusForbidden)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, MaxRequestBytes)
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	reader := bufio.NewReader(bytes.NewReader(body))
+	oldLine, err := readLine(reader)
+	if err != nil {
+		http.Error(w, "parse old size: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	var oldSize uint64
+	_, err = fmt.Sscanf(oldLine, "old %d", &oldSize)
+	if err != nil {
+		http.Error(w, "parse old size value: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var proof []tlogx.Hash
+	for {
+		line, err := readLine(reader)
+		if err != nil {
+			http.Error(w, "parse proof: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		if line == "" {
+			break
+		}
+		hBytes, err := base64.StdEncoding.DecodeString(line)
+		if err != nil {
+			http.Error(w, "decode proof hash: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		var h tlogx.Hash
+		copy(h[:], hBytes)
+		proof = append(proof, h)
+	}
+
+	checkpointNote, err := io.ReadAll(reader)
+	if err != nil {
+		http.Error(w, "read checkpoint: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	noteParts := strings.SplitN(string(checkpointNote), "\n\n", 2)
+	if len(noteParts) < 1 {
+		http.Error(w, "invalid checkpoint note", http.StatusBadRequest)
+		return
+	}
+	noteBodyLines := strings.Split(strings.TrimRight(noteParts[0], "\n"), "\n")
+	if len(noteBodyLines) != 3 {
+		http.Error(w, "invalid checkpoint note body", http.StatusBadRequest)
+		return
+	}
+	newSize, err := strconv.ParseUint(noteBodyLines[1], 10, 64)
+	if err != nil {
+		http.Error(w, "invalid checkpoint size", http.StatusBadRequest)
+		return
+	}
+	newRootBytes, err := base64.StdEncoding.DecodeString(noteBodyLines[2])
+	if err != nil {
+		http.Error(w, "invalid checkpoint root", http.StatusBadRequest)
+		return
+	}
+	var newRoot tlogx.Hash
+	copy(newRoot[:], newRootBytes)
+
+	currentSize, currentRoot, _ := s.cfg.Follower.Current()
+
+	if currentSize > 0 && oldSize != currentSize {
+		http.Error(w, fmt.Sprintf("old size mismatch: got %d, current %d", oldSize, currentSize), http.StatusConflict)
+		return
+	}
+
+	if oldSize == newSize {
+		if newRoot != currentRoot {
+			http.Error(w, "root mismatch for same size", http.StatusBadRequest)
+			return
+		}
+	} else if oldSize == 0 {
+		// Accept any new root if we have no prior state
+	} else {
+		// Verify consistency proof: old tree → new tree.
+		if err := tlogx.VerifyConsistencyProof(
+			sha256Hash, 0, oldSize, newSize, proof,
+			currentRoot, newRoot,
+		); err != nil {
+			http.Error(w, "consistency proof failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.cfg.Follower.cfg.Logger.Info("consistency proof valid",
+			"old_size", oldSize,
+			"new_size", newSize)
+	}
+
+	logID, err := cert.ParseOIDName(noteBodyLines[0])
+	if err != nil {
+		http.Error(w, "invalid checkpoint origin: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	st := cert.MTCSubtree{
+		LogID: logID,
+		Start: 0,
+		End:   newSize,
+		Hash:  newRoot,
+	}
+	msg, err := cert.MarshalSignatureInput(s.cfg.CosignerID, &st)
+	if err != nil {
+		http.Error(w, "build signature input: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	sig, err := s.cfg.Signer.Sign(rand.Reader, msg)
+	if err != nil {
+		http.Error(w, "sign failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	keyName := cert.OIDName(s.cfg.CosignerID)
+	keyID, err := cert.MTCCheckpointKeyID(keyName, cert.SignatureAlgorithm(s.cfg.Signer.Algorithm()), s.cfg.Signer.PublicKey())
+	if err != nil {
+		http.Error(w, "key id: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	sigWithID := append(append([]byte(nil), keyID[:]...), cert.MarshalTimestampedSignature(0, sig)...)
+	line := fmt.Sprintf("— %s %s\n", keyName, base64.StdEncoding.EncodeToString(sigWithID))
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	_, _ = w.Write([]byte(line))
 }
 
 // MaxRequestBytes caps the sign-subtree request body. A subtree note

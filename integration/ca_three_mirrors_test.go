@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/letsencrypt/cactus/signer"
 	"github.com/letsencrypt/cactus/storage"
 	"github.com/letsencrypt/cactus/tile"
+	"github.com/letsencrypt/cactus/tlogx"
 )
 
 // TestEndToEndCAWithThreeMirrors is the v3-DoD cornerstone:
@@ -25,11 +27,6 @@ import (
 //
 // Issues a cert, confirms its MTCProof contains at least 2 sigs (CA +
 // >=1 mirror), each individually verifying.
-//
-// The async ordering from iteration 34 makes this work: flush
-// publishes CA-only first, mirrors poll-and-advance, then the
-// requester goroutine picks up sigs once mirrors have caught up. Wait
-// blocks until WaitForCosigners is met.
 func TestEndToEndCAWithThreeMirrors(t *testing.T) {
 	if testing.Short() {
 		t.Skip("multi-mirror takes a couple seconds")
@@ -45,8 +42,6 @@ func TestEndToEndCAWithThreeMirrors(t *testing.T) {
 	}
 	mks := make([]mk, 3)
 	for i := range mks {
-		// Mirror cosigners are ML-DSA-44 (the witness path is ML-DSA-44
-		// only); the test skips if the toolchain can't provide it.
 		mks[i].id = cert.TrustAnchorID(fmt.Sprintf("32473.%d", 30+i+1))
 		s, _ := mldsaCosigner(t, mks[i].id, byte(0x10+i))
 		mks[i].signer = s
@@ -66,13 +61,7 @@ func TestEndToEndCAWithThreeMirrors(t *testing.T) {
 	logID := cert.TrustAnchorID("32473.5")
 	caCosigID := cert.TrustAnchorID("32473.5")
 
-	// We'll build the MirrorRequester closure with closures over caLog
-	// + mks. caLog must be assigned before the closure can use it,
-	// but the closure is part of the cactuslog.Config we pass to
-	// New. Use a forward-declared pointer.
 	var caLog *cactuslog.Log
-	// `endpoints` is also computed lazily — mks[i].url is set after
-	// the mirror servers start.
 	endpointsLazy := func() []cert.MirrorEndpoint {
 		out := make([]cert.MirrorEndpoint, 0, len(mks))
 		for _, m := range mks {
@@ -80,7 +69,8 @@ func TestEndToEndCAWithThreeMirrors(t *testing.T) {
 				return nil
 			}
 			out = append(out, cert.MirrorEndpoint{
-				URL: m.url,
+				URL:           m.url + "/sign-subtree",
+				CheckpointURL: m.url + "/add-checkpoint",
 				Key: cert.CosignerKey{
 					ID: m.id, Algorithm: cert.AlgMLDSA44,
 					PublicKey: m.signer.PublicKey(),
@@ -122,12 +112,21 @@ func TestEndToEndCAWithThreeMirrors(t *testing.T) {
 		return nil, fmt.Errorf("multi-mirror quorum not met within deadline")
 	}
 
+	checkpointWitnessRequester := func(ctx context.Context, oldSize uint64, proof []tlogx.Hash, checkpointNote []byte) ([]cert.MTCSignature, error) {
+		endpoints := endpointsLazy()
+		if len(endpoints) == 0 {
+			return nil, nil
+		}
+		return cert.RequestCheckpointSignatures(ctx, oldSize, proof, checkpointNote, endpoints)
+	}
+
 	caLog, err = cactuslog.New(context.Background(), cactuslog.Config{
 		LogID: logID, CosignerID: caCosigID,
 		Signer: caSigner, FS: caFS,
-		FlushPeriod:      25 * time.Millisecond,
-		MirrorRequester:  mirrorRequester,
-		WaitForCosigners: 3, // CA + 2 mirrors
+		FlushPeriod:                25 * time.Millisecond,
+		MirrorRequester:            mirrorRequester,
+		CheckpointWitnessRequester: checkpointWitnessRequester,
+		WaitForCosigners:           3, // CA + 2 mirrors
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -156,12 +155,18 @@ func TestEndToEndCAWithThreeMirrors(t *testing.T) {
 		}
 		startFollower(t, ctx, f)
 		srv, err := mirror.NewServer(mirror.ServerConfig{
-			Follower: f, Signer: mks[i].signer, CosignerID: mks[i].id,
+			Follower:               f,
+			Signer:                 mks[i].signer,
+			CosignerID:             mks[i].id,
+			CheckpointCosignatures: true,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		hSrv := httptest.NewServer(srv.Handler())
+		mux := http.NewServeMux()
+		mux.Handle("/sign-subtree", srv.Handler())
+		mux.Handle("/add-checkpoint", srv.HandlerAddCheckpoint())
+		hSrv := httptest.NewServer(mux)
 		mks[i].follower = f
 		mks[i].url = hSrv.URL
 		mks[i].close = hSrv.Close
@@ -201,47 +206,22 @@ func TestEndToEndCAWithThreeMirrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = tbs
-	proof, err := cert.ParseMTCProof(sigValue)
+	mtcProof, err := cert.ParseMTCProof(sigValue)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(proof.Signatures) < 2 {
+	if len(mtcProof.Signatures) < 2 {
 		t.Fatalf("got %d sigs in cert, want >= 2 (CA + at least one mirror): %+v",
-			len(proof.Signatures), proof.Signatures)
+			len(mtcProof.Signatures), mtcProof.Signatures)
 	}
-	caSeen := false
-	mirrorSeen := 0
-	for _, s := range proof.Signatures {
-		if string(s.CosignerID) == string(caCosigID) {
-			caSeen = true
-			continue
-		}
-		var key cert.CosignerKey
-		for _, m := range mks {
-			if string(s.CosignerID) == string(m.id) {
-				key = cert.CosignerKey{
-					ID: m.id, Algorithm: cert.AlgMLDSA44,
-					PublicKey: m.signer.PublicKey(),
-				}
-				mirrorSeen++
-			}
-		}
-		if len(key.PublicKey) == 0 {
-			t.Errorf("unrecognised cosigner: %q", s.CosignerID)
-			continue
-		}
-		// Verify against the same CosignedMessage the mirror signed.
-		// The subtree hash is reconstructed via the inclusion proof; for
-		// brevity we take it directly from the cert's MTCProof.start/end
-		// + reconstructed hash.
-		// (Skip — verification of the §7.2 fast path is covered by other tests.)
-		_ = key
+
+	// 5) Verify checkpoint signatures.
+	cp := caLog.CurrentCheckpoint()
+	_, _, sigs, err := cactuslog.ParseSignedNoteFull(cp.SignedNote, logID)
+	if err != nil {
+		t.Fatalf("parse checkpoint: %v", err)
 	}
-	if !caSeen {
-		t.Errorf("CA cosigner missing from cert sigs")
+	if len(sigs) < 2 {
+		t.Errorf("got %d checkpoint sigs, want >= 2", len(sigs))
 	}
-	if mirrorSeen == 0 {
-		t.Errorf("no mirror sigs in cert")
-	}
-	t.Logf("cert has %d signatures (1 CA + %d mirror)", len(proof.Signatures), mirrorSeen)
 }

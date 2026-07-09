@@ -47,6 +47,7 @@ import (
 	"github.com/letsencrypt/cactus/signer"
 	"github.com/letsencrypt/cactus/storage"
 	"github.com/letsencrypt/cactus/tile"
+	"github.com/letsencrypt/cactus/tlogx"
 )
 
 // pemDecode is just pem.Decode kept here so the file can keep the
@@ -91,7 +92,8 @@ func buildMirrorEndpoints(mirrors []config.MirrorEndpointConfig, dataDir string)
 			return nil, fmt.Errorf("mirrors[%d] public_key_path: %w", i, err)
 		}
 		out = append(out, cert.MirrorEndpoint{
-			URL: m.URL,
+			URL:           m.URL,
+			CheckpointURL: strings.TrimSuffix(m.URL, "/sign-subtree") + "/add-checkpoint",
 			Key: cert.CosignerKey{
 				ID:        cert.TrustAnchorID(m.ID),
 				Algorithm: signerAlgToCertAlg(alg),
@@ -306,10 +308,16 @@ func run(cfg config.Config, logger *slog.Logger) error {
 			}
 			return nil, fmt.Errorf("multi-mirror quorum not met within %s", cfg.CACosignerQuorum.RetryDeadline())
 		}
+		if cfg.CACosignerQuorum.CheckpointCosignatures {
+			logCfg.CheckpointWitnessRequester = func(ctx context.Context, oldSize uint64, proof []tlogx.Hash, checkpointNote []byte) ([]cert.MTCSignature, error) {
+				return cert.RequestCheckpointSignatures(ctx, oldSize, proof, checkpointNote, endpoints)
+			}
+		}
 		logger.Info("multi-mirror CA mode enabled",
 			"mirrors", len(endpoints),
 			"min_signatures", cfg.CACosignerQuorum.MinSignatures,
-			"request_timeout", cfg.CACosignerQuorum.RequestTimeout())
+			"request_timeout", cfg.CACosignerQuorum.RequestTimeout(),
+			"checkpoint_cosignatures", cfg.CACosignerQuorum.CheckpointCosignatures)
 	}
 	l, err = cactuslog.New(ctx, logCfg)
 	if err != nil {
@@ -529,6 +537,7 @@ func startMirror(
 			Requests:        mirrorCounterVecAdapter{m.MirrorSignSubtreeRequests},
 			RequestDuration: m.MirrorSignSubtreeDuration,
 		},
+		CheckpointCosignatures: cfg.Mirror.CheckpointCosignatures,
 	}
 	if cfg.Mirror.RequireCASignatureOnSubtree {
 		mServerCfg.UpstreamCAKey = &cert.CosignerKey{
@@ -553,6 +562,9 @@ func startMirror(
 	mux.Handle("GET /config", mSrv.HandlerConfig())
 	mux.Handle("GET /{$}", mSrv.HandlerIndex())
 
+	if cfg.Mirror.CheckpointCosignatures {
+		mux.Handle("/add-checkpoint", mSrv.HandlerAddCheckpoint())
+	}
 	return &http.Server{
 		Addr:              cfg.Mirror.SignSubtreeListen,
 		Handler:           logging.Middleware(logger)(mirror.UnescapeSlashMiddleware(mux)),

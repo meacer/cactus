@@ -33,7 +33,8 @@ type CACosignerQuorum struct {
 	BestEffortAfterMinimum bool                   `json:"best_effort_after_minimum"`
 	// MirrorRetryDeadlineMS is how long the requester closure keeps
 	// re-trying when mirrors haven't caught up yet.
-	MirrorRetryDeadlineMS int `json:"mirror_retry_deadline_ms"`
+	MirrorRetryDeadlineMS  int                    `json:"mirror_retry_deadline_ms"`
+	CheckpointCosignatures bool                   `json:"checkpoint_cosignatures"`
 }
 
 // RequestTimeout is a typed-time accessor.
@@ -69,6 +70,7 @@ type MirrorConfig struct {
 	SignSubtreeListen           string         `json:"sign_subtree_listen"`
 	SignSubtreePath             string         `json:"sign_subtree_path"`
 	RequireCASignatureOnSubtree bool           `json:"require_ca_signature_on_subtree"`
+	CheckpointCosignatures      bool           `json:"checkpoint_cosignatures"`
 }
 
 // UpstreamConfig describes the log being mirrored.
@@ -297,6 +299,9 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("ca_cosigner_quorum.mirrors[%d].public_key_path required", i)
 			}
 		}
+	}
+	if c.CACosignerQuorum.CheckpointCosignatures && len(c.CACosignerQuorum.Mirrors) == 0 {
+		return fmt.Errorf("ca_cosigner_quorum.checkpoint_cosignatures requires at least one mirror in ca_cosigner_quorum.mirrors")
 	}
 	if c.Mirror.Enabled {
 		if c.Mirror.CosignerID == "" {

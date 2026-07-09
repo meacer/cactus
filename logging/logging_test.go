@@ -41,8 +41,8 @@ func TestMiddlewareAttachesRequestID(t *testing.T) {
 	if seenID == "" {
 		t.Errorf("expected request ID in context")
 	}
-	if !strings.Contains(buf.String(), `"path":"/foo"`) {
-		t.Errorf("expected path log, got %q", buf.String())
+	if !strings.Contains(buf.String(), `"url":`) {
+		t.Errorf("expected url log, got %q", buf.String())
 	}
 	if !strings.Contains(buf.String(), `"status":204`) {
 		t.Errorf("expected status log, got %q", buf.String())

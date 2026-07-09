@@ -101,8 +101,7 @@ func TestCheckpointSignatureVerifies(t *testing.T) {
 	}
 	// First 4 bytes are the c2sp.org/signed-note keyID; the rest is the
 	// c2sp.org/tlog-cosignature timestamped_signature (u64 timestamp ||
-	// raw signature). For ML-DSA-44 the key ID is
-	// SHA-256(name || 0x0A || 0x06 || raw key)[:4].
+	// raw signature).
 	wantKeyID, err := cert.CosignatureKeyID(cert.OIDName(cosignerID),
 		cert.AlgMLDSA44, s.PublicKey())
 	if err != nil {

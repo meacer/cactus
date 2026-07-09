@@ -110,3 +110,10 @@ func CosignatureKeyID(name string, alg SignatureAlgorithm, pub []byte) ([4]byte,
 	copy(out[:], h.Sum(nil)[:4])
 	return out, nil
 }
+
+// MTCCheckpointKeyID computes the key ID for a checkpoint signature.
+// In draft-04, this follows the standard c2sp signed-note key ID
+// calculation (the same as CosignatureKeyID).
+func MTCCheckpointKeyID(name string, alg SignatureAlgorithm, pub []byte) ([4]byte, error) {
+	return CosignatureKeyID(name, alg, pub)
+}

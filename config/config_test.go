@@ -66,6 +66,7 @@ func TestValidationErrors(t *testing.T) {
 		{"bad hash", `{"data_dir":"/tmp","log":{"number":1,"shortname":"x","hash":"sha512","checkpoint_period_ms":1,"pool_size":1},"ca_cosigner":{"id":"a","algorithm":"ecdsa-p256-sha256","seed_path":"x"},"acme":{"listen":":1","challenge_mode":"auto-pass"},"monitoring":{"listen":":2"},"metrics":{"listen":":3"}}`},
 		{"bad algorithm", `{"data_dir":"/tmp","log":{"number":1,"shortname":"x","hash":"sha256","checkpoint_period_ms":1,"pool_size":1},"ca_cosigner":{"id":"a","algorithm":"rsa","seed_path":"x"},"acme":{"listen":":1","challenge_mode":"auto-pass"},"monitoring":{"listen":":2"},"metrics":{"listen":":3"}}`},
 		{"unknown field", `{"data_dir":"/tmp","unknown":1,"log":{"number":1,"shortname":"x","hash":"sha256","checkpoint_period_ms":1,"pool_size":1},"ca_cosigner":{"id":"a","algorithm":"ecdsa-p256-sha256","seed_path":"x"},"acme":{"listen":":1","challenge_mode":"auto-pass"},"monitoring":{"listen":":2"},"metrics":{"listen":":3"}}`},
+		{"checkpoint_cosignatures without mirrors", `{"data_dir":"/tmp","log":{"number":1,"shortname":"x","hash":"sha256","checkpoint_period_ms":1,"pool_size":1},"ca_cosigner":{"id":"a","algorithm":"mldsa-44","seed_path":"x"},"ca_cosigner_quorum":{"checkpoint_cosignatures":true},"acme":{"listen":":1","challenge_mode":"auto-pass"},"monitoring":{"listen":":2"},"metrics":{"listen":":3}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -108,11 +109,13 @@ func TestRedactedOmitsSecretsAndPaths(t *testing.T) {
 				Algorithm:     "mldsa-44",
 				PublicKeyPath: "keys/" + secret,
 			}},
-			MinSignatures: 1,
+			MinSignatures:          1,
+			CheckpointCosignatures: true,
 		},
 		Mirror: MirrorConfig{
-			Enabled:    true,
-			CosignerID: "id-mirror-cosigner",
+			Enabled:                true,
+			CheckpointCosignatures: true,
+			CosignerID:             "id-mirror-cosigner",
 			Algorithm:  "mldsa-44",
 			SeedPath:   "keys/" + secret,
 			Upstream: UpstreamConfig{
