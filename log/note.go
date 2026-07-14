@@ -60,7 +60,7 @@ func AppendSignaturesToNote(note []byte, sigs []cert.MTCSignature) []byte {
 	b.Write(note)
 	for _, sig := range sigs {
 		keyName := cert.OIDName(sig.CosignerID)
-		sigWithID := append(append([]byte(nil), sig.CheckpointKeyID[:]...), sig.Signature...)
+		sigWithID := append(append([]byte(nil), sig.CheckpointKeyID[:]...), cert.MarshalTimestampedSignature(0, sig.Signature)...)
 		sigB64 := base64.StdEncoding.EncodeToString(sigWithID)
 		fmt.Fprintf(&b, "— %s %s\n", keyName, sigB64)
 	}
